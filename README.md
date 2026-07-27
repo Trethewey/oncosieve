@@ -1,7 +1,7 @@
 <div align="center">
   <img src="assets/oncosieve-grid-redblue-text.svg" width="550" alt="OncoSieve logo"/>
 
-  [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+  [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
   <p><strong>Pan-Cancer Somatic Variant Whitelist Curation Tool</strong></p>
   <p><em>7 databases · 46.4 million variants</em></p>
@@ -142,7 +142,7 @@ pip install -r requirements.txt
 
 ```bash
 # 1. Clone and install
-git clone https://github.com/Trethewey/OncoSieve.git && cd OncoSieve
+git clone https://github.com/Trethewey/oncosieve.git && cd oncosieve
 pip install -r requirements.txt
 
 # 2. Copy settings.yaml.example to settings.yaml and add your OncoKB token
@@ -483,7 +483,7 @@ All three paths assume the `data/` directory is populated as described in [Data 
 
 ## Licence
 
-OncoSieve is released under the [MIT License](LICENSE). The pipeline code is permissively licensed and you may copy, modify, and redistribute it freely.
+OncoSieve is released under the [GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later)](LICENSE). AGPL is a strong copyleft licence: you may copy, modify, and redistribute the code, but any distribution or **network-accessible deployment** of a modified version must offer the corresponding modified source under the same licence. See the [FSF page on the AGPL](https://www.gnu.org/licenses/agpl-3.0.html) for the full terms.
 
 The underlying **data sources** are governed by their own licences (e.g. COSMIC requires a commercial-use licence, OncoKB requires an academic API token, Illumina PrimateAI-3D requires a data licence). You are responsible for complying with each source's terms separately.
 

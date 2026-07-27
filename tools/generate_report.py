@@ -859,7 +859,7 @@ def build_report(df_full, df_hc, out_path, logo_path=None, db_versions_path=None
         '    <span class="header-sep"></span>',
         f'    <p class="header-subtitle">Pan-Cancer Variant Whitelist &nbsp;&ndash;&nbsp; Generated {report_date}</p>',
         '    <div class="header-meta">GRCh38 &nbsp;&middot;&nbsp; COSMIC &middot; GENIE &middot; TCGA &middot; ClinVar &middot; OncoKB &middot; CancerHotspots &middot; TP53 &nbsp;&ndash;&nbsp; REVEL &middot; PrimateAI-3D</div>',
-        '    <div class="header-meta"><a href="https://github.com/Trethewey/ONCOSIEVE" style="color:#3D6E8F;text-decoration:none;">&#128279; github.com/Trethewey/ONCOSIEVE</a></div>',
+        '    <div class="header-meta"><a href="https://github.com/Trethewey/oncosieve" style="color:#3D6E8F;text-decoration:none;">&#128279; github.com/Trethewey/oncosieve</a></div>',
         "  </div>",
         "</div>",
 
