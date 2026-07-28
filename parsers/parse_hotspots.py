@@ -25,6 +25,7 @@ import pandas as pd
 from parsers.common import (
     STANDARD_COLS,
     empty_standard_df,
+    map_consequence,
     setup_logger,
 )
 
@@ -58,8 +59,6 @@ def parse_hotspots(tsv_path: str,
         log.error('Failed to read hotspots TSV: %s', e)
         return empty_standard_df()
 
-    from parsers.common import CONSEQUENCE_MAP
-
     # Vectorized processing
     # q-value filter
     df['qvalue'] = pd.to_numeric(df.get('qvalue', pd.Series(dtype=float)), errors='coerce').fillna(1.0)
@@ -71,8 +70,10 @@ def parse_hotspots(tsv_path: str,
     df['ref'] = df['ref'].fillna('').str.strip().str.upper()
     df['alt'] = df['alt'].fillna('').str.strip().str.upper()
 
-    # Filter invalid alleles
-    valid_re = r'^[ACGTNacgtn*\-]+$'
+    # Filter invalid alleles. '-' is intentionally excluded — MAF-style '-'
+    # alleles are not valid VCF and must be normalised upstream if they are
+    # to appear in the output.
+    valid_re = r'^[ACGTNacgtn*]+$'
     valid_mask = df['ref'].str.match(valid_re, na=False) & df['alt'].str.match(valid_re, na=False)
     n_skipped_allele = (~valid_mask).sum()
     df = df[valid_mask].copy()
@@ -95,13 +96,20 @@ def parse_hotspots(tsv_path: str,
         else:
             df[col] = ''
 
-    # Consequence mapping
+    # Consequence mapping — use map_consequence so VEP '&'-joined multi-term
+    # consequences (e.g. 'missense_variant&splice_region_variant') are handled
+    # rather than degrading silently to 'unknown'.
     if 'consequence' in df.columns:
-        df['consequence'] = df['consequence'].fillna('unknown').str.strip().map(CONSEQUENCE_MAP).fillna('unknown')
+        df['consequence'] = df['consequence'].fillna('').astype(str).str.strip().apply(map_consequence)
     else:
         df['consequence'] = 'unknown'
 
-    df['cancer_type'] = 'pan_cancer'
+    # cancer_type left as 'unspecified' (aggregator sentinel excluded from
+    # n_cancer_types). The 'pan-cancer' semantics of CancerHotspots are already
+    # carried by the passes_hotspot flag in apply_filters, so hard-coding the
+    # literal 'pan_cancer' here previously inflated n_cancer_types past the
+    # tier1_min_cancer_types threshold on any hotspot-overlapping variant.
+    df['cancer_type'] = 'unspecified'
     df['source'] = 'CancerHotspots'
 
     log.info(
