@@ -431,7 +431,10 @@ def main():
             promote_mask = (pred == 'pathogenic') & (pct >= 0.9) & (tier == 3)
             n_promoted = int(promote_mask.sum())
             if n_promoted:
-                wl.loc[promote_mask, 'wl_tier'] = 2
+                # wl_tier is string-typed at this point (post_pipeline reads
+                # everything as dtype=str, coerce_numerics runs later). Assign
+                # a string so the pyarrow-backed column accepts it.
+                wl.loc[promote_mask, 'wl_tier'] = '2'
                 print(f'  PrimateAI-3D: promoted {n_promoted} Tier 3 variant(s) '
                       f'to Tier 2 on high-confidence pathogenic prediction '
                       f'(percentile >= 0.9)')
