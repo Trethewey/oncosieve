@@ -1,8 +1,8 @@
 # =============================================================================
-# ONCOSIEVE v1.0 -- Docker Compose
+# OncoSieve -- Docker Compose
 #
 # Usage:
-#   cd oncosieve.1.0
+#   cd oncosieve
 #   docker-compose -f packaging/docker-compose.yml up
 #
 # Edit the volume paths below to point to your data and output directories.

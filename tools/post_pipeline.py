@@ -418,6 +418,26 @@ def main():
         pai_mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(pai_mod)
         wl = pai_mod.annotate_primateai(wl, pai_path)
+
+        # PrimateAI-3D tier promotion: rescue Tier 3 variants that
+        # PrimateAI-3D classifies as high-confidence pathogenic. Threshold
+        # matches the v2 planning note (annotate_primateai.py:329-331).
+        if ('primateai_prediction' in wl.columns
+                and 'primateai_percentile' in wl.columns
+                and 'wl_tier' in wl.columns):
+            pred = wl['primateai_prediction'].astype(str).str.strip().str.lower()
+            pct  = pd.to_numeric(wl['primateai_percentile'], errors='coerce')
+            tier = pd.to_numeric(wl['wl_tier'], errors='coerce')
+            promote_mask = (pred == 'pathogenic') & (pct >= 0.9) & (tier == 3)
+            n_promoted = int(promote_mask.sum())
+            if n_promoted:
+                wl.loc[promote_mask, 'wl_tier'] = 2
+                print(f'  PrimateAI-3D: promoted {n_promoted} Tier 3 variant(s) '
+                      f'to Tier 2 on high-confidence pathogenic prediction '
+                      f'(percentile >= 0.9)')
+            else:
+                print('  PrimateAI-3D: no Tier 3 variants met the promotion '
+                      'criteria (pathogenic + percentile >= 0.9)')
     elif pai_path:
         print(f'\n[3/7] PrimateAI-3D file not found: {pai_path} — skipping.')
     else:
@@ -510,11 +530,18 @@ def main():
         report_date = datetime.datetime.now().strftime('%Y-%m-%d')
         report_path = os.path.join(args.out_dir,
                                    f'oncosieve_report_{report_date}.html')
+        # Auto-discover database_versions.txt in --out-dir so the Sources
+        # versions table appears in the report. build_whitelist.py writes
+        # this file next to the whitelist; without passing the path here it
+        # would silently be omitted from the pipeline-produced report.
+        db_versions_candidate = Path(args.out_dir) / 'database_versions.txt'
+        db_versions_arg = str(db_versions_candidate) if db_versions_candidate.exists() else None
         gr.build_report(
             wl,
             wl_hc,
             Path(report_path),
             logo_path=logo_path,
+            db_versions_path=db_versions_arg,
         )
 
     print('\nPost-pipeline complete.')

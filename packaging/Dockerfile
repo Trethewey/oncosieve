@@ -1,5 +1,5 @@
 # =============================================================================
-# ONCOSIEVE v1.0 -- Docker Container
+# OncoSieve -- Docker Container
 #
 # Build:
 #   docker build -t oncosieve:1.0 -f packaging/Dockerfile .
@@ -14,7 +14,7 @@
 FROM ubuntu:22.04
 
 LABEL maintainer="Dr Christopher Trethewey <christopher.trethewey@nhs.net>"
-LABEL description="ONCOSIEVE v1.0 -- Pan-Cancer Somatic Variant Whitelist Curation"
+LABEL description="OncoSieve -- Pan-Cancer Somatic Variant Whitelist Curation"
 
 # Avoid interactive prompts during build
 ENV DEBIAN_FRONTEND=noninteractive

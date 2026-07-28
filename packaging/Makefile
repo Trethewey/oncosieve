@@ -1,5 +1,5 @@
 # =============================================================================
-# ONCOSIEVE v1.0 -- Makefile
+# OncoSieve -- Makefile
 #
 # Usage:
 #   make install          Install conda environment
@@ -48,7 +48,7 @@ endif
 
 help:  ## Show this help
 	@echo ""
-	@echo "  ONCOSIEVE v1.0 -- Available targets:"
+	@echo "  OncoSieve -- Available targets:"
 	@echo ""
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "    %-18s %s\n", $$1, $$2}'

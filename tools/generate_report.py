@@ -58,8 +58,17 @@ PALETTE = [
     "#7B1040",  # burgundy
 ]
 
+# Version stamped into the report header. Kept as a module-level constant so
+# there is one place to bump on release rather than a hard-coded literal that
+# silently rots (the v2.0 report continued to advertise "2.0" past subsequent
+# fixes).
+ONCOSIEVE_VERSION = "2.1"
+
 TIER_COLORS = {1: "#3D6E8F", 2: "#3D3785", 3: "#8FBCAA"}
 
+# TCGA and TP53 previously shared the same colour, so any chart split by
+# source could not distinguish them. TP53 is given its own dedicated slot
+# from the palette.
 SOURCE_COLORS = {
     "COSMIC":         "#3D6E8F",
     "GENIE":          "#3D3785",
@@ -67,7 +76,7 @@ SOURCE_COLORS = {
     "ClinVar":        "#C8F2D4",
     "OncoKB":         "#5C1A4E",
     "CancerHotspots": "#7B1040",
-    "TP53":           "#8FBCAA",
+    "TP53":           "#6DC5A0",
 }
 
 TEMPLATE = "plotly_dark"
@@ -152,6 +161,7 @@ def build_kpi_cards(df_full, df_hc):
             f'<div class="kpi-row2">'
             f'<span class="kpi-badge" style="color:{TIER_COLORS[1]}">Tier 1: {t1:,}</span>'
             f'<span class="kpi-badge" style="color:{TIER_COLORS[2]}">Tier 2: {t2:,}</span>'
+            f'<span class="kpi-badge" style="color:{TIER_COLORS[3]}">Tier 3: {int((df["wl_tier"] == 3).sum()):,}</span>'
             f'</div>'
             f'<div class="kpi-detail">REVEL scored: {_revel_stat(df)}</div>'
             f'{pai_line}'
@@ -343,24 +353,55 @@ def chart_top_genes(df_hc, top_n=100):
 DISPLAY_COLS = [
     "chrom", "pos", "ref", "alt", "gene", "transcript_id", "is_mane_select",
     "refseq_id", "hgvsc", "hgvsp", "protein_change", "consequence", "wl_tier",
-    "n_samples", "n_cancer_types", "sources",
+    "n_samples", "n_cancer_types", "cancer_types", "sources",
     "oncokb_oncogenicity", "clinvar_clinical_significance",
     "transcript_source", "tp53_class", "revel_score",
     "primateai_score", "primateai_percentile", "primateai_prediction",
 ]
 
-_TIER_COL_IDX  = DISPLAY_COLS.index("wl_tier")
-_NSAMP_COL_IDX = DISPLAY_COLS.index("n_samples")
+# Human-friendly labels for the DataTable header — snake_case identifiers are
+# hostile to non-bioinformatician readers. Any column not listed here falls
+# back to its raw identifier.
+DISPLAY_COL_LABELS = {
+    "chrom":                          "Chromosome",
+    "pos":                            "Position",
+    "ref":                            "Ref",
+    "alt":                            "Alt",
+    "gene":                           "Gene",
+    "transcript_id":                  "Transcript ID",
+    "is_mane_select":                 "MANE Select",
+    "refseq_id":                      "RefSeq",
+    "hgvsc":                          "HGVSc",
+    "hgvsp":                          "HGVSp",
+    "protein_change":                 "Protein change",
+    "consequence":                    "Consequence",
+    "wl_tier":                        "Tier",
+    "n_samples":                      "n_samples",
+    "n_cancer_types":                 "Cancer types (count)",
+    "cancer_types":                   "Cancer types",
+    "sources":                        "Sources",
+    "oncokb_oncogenicity":            "OncoKB",
+    "clinvar_clinical_significance":  "ClinVar significance",
+    "transcript_source":              "Transcript source",
+    "tp53_class":                     "TP53 class",
+    "revel_score":                    "REVEL",
+    "primateai_score":                "PrimateAI-3D score",
+    "primateai_percentile":           "PrimateAI-3D percentile",
+    "primateai_prediction":           "PrimateAI-3D prediction",
+}
 
 
 def build_datatable(df, table_id):
     """
-    Returns (table_html, data_json, tier_col_idx).
+    Returns (table_html, data_json, tier_col_idx, nsamp_col_idx).
 
     table_html has an empty <tbody>; DataTables populates it lazily from
     `data_json`, which is a JSON array of arrays of pre-escaped cell strings.
-    tier_col_idx is the index of the wl_tier column in each row (or -1) so the
-    JS createdRow callback can apply the tier-N row class.
+    tier_col_idx / nsamp_col_idx are computed from the ACTUAL filtered
+    column set — not from the DISPLAY_COLS constant — so if any upstream
+    column is missing (e.g. no primateai_score, no refseq_id), the DataTable
+    still sorts and highlights the right column instead of the position the
+    module was authored to expect.
     """
     cols = [c for c in DISPLAY_COLS if c in df.columns]
     sub = df[cols].copy()
@@ -371,7 +412,9 @@ def build_datatable(df, table_id):
     def esc(v):
         return "" if pd.isna(v) else html_module.escape(str(v))
 
-    thead = "<thead><tr>" + "".join(f"<th>{c}</th>" for c in cols) + "</tr></thead>"
+    thead = "<thead><tr>" + "".join(
+        f"<th>{html_module.escape(DISPLAY_COL_LABELS.get(c, c))}</th>" for c in cols
+    ) + "</tr></thead>"
     table_html = (
         f'<table id="{table_id}" class="display compact" style="width:100%">'
         f"{thead}<tbody></tbody></table>"
@@ -379,8 +422,9 @@ def build_datatable(df, table_id):
 
     rows_data = [[esc(row[c]) for c in cols] for _, row in sub.iterrows()]
     data_json = json.dumps(rows_data, separators=(",", ":"))
-    tier_col_idx = cols.index("wl_tier") if "wl_tier" in cols else -1
-    return table_html, data_json, tier_col_idx
+    tier_col_idx  = cols.index("wl_tier")   if "wl_tier"   in cols else -1
+    nsamp_col_idx = cols.index("n_samples") if "n_samples" in cols else 0
+    return table_html, data_json, tier_col_idx, nsamp_col_idx
 
 
 # ── Database versions / Sources table ──────────────────────────────────────────
@@ -782,12 +826,23 @@ table.dataTable tbody tr.tier-2 td:nth-child(%(TIER_COL_1B)s) {
 """
 
 
-def _css():
+def _css(tier_col_1b=None):
+    """Render the CSS.
+
+    tier_col_1b is the 1-based column index of wl_tier in the CURRENT
+    DataTable — passed in from build_report so the tier-row highlight
+    lands on the right column even when upstream columns are missing.
+    Falls back to the DISPLAY_COLS position if not supplied (legacy
+    callers).
+    """
+    if tier_col_1b is None:
+        # Legacy default: position wl_tier occupies in the DISPLAY_COLS list.
+        tier_col_1b = DISPLAY_COLS.index("wl_tier") + 1
     return _CSS_TEMPLATE % dict(
         BG_PAGE=BG_PAGE, BG_CARD=BG_CARD, BG_CHART=BG_CHART,
         BORDER=BORDER, TEXT_PRI=TEXT_PRI, TEXT_SEC=TEXT_SEC, ACCENT=ACCENT,
         TIER1_COLOR=TIER_COLORS[1], TIER2_COLOR=TIER_COLORS[2],
-        TIER_COL_1B=_TIER_COL_IDX + 1,
+        TIER_COL_1B=tier_col_1b,
     )
 
 
@@ -806,7 +861,7 @@ def build_report(df_full, df_hc, out_path, logo_path=None, db_versions_path=None
     div_genes  = fig_to_div(f_genes)
 
     print("  Building variant table (high-confidence)...")
-    tbl_hc, tbl_hc_data, tbl_hc_tier_idx = build_datatable(df_hc, "tbl-hc")
+    tbl_hc, tbl_hc_data, tbl_hc_tier_idx, tbl_hc_nsamp_idx = build_datatable(df_hc, "tbl-hc")
 
     print("  Assembling HTML...")
     logo_img    = _logo_tag(logo_path)
@@ -816,8 +871,26 @@ def build_report(df_full, df_hc, out_path, logo_path=None, db_versions_path=None
     sources_table_html = build_sources_table(_parse_db_versions(db_versions_path))
     report_date = date.today().isoformat()
     n_hc        = len(df_hc)
-    css         = _css()
-    nsamp_col   = _NSAMP_COL_IDX
+    # Compute the dynamic tier column index for CSS and JS from the actual
+    # DataTable columns; this replaces the module-level _TIER_COL_IDX and
+    # _NSAMP_COL_IDX constants that would silently point at the wrong column
+    # when any upstream column was missing.
+    css         = _css(tier_col_1b=(tbl_hc_tier_idx + 1) if tbl_hc_tier_idx >= 0 else 1)
+    nsamp_col   = tbl_hc_nsamp_idx
+
+    # Compose the version-and-source header meta strip from the actual data
+    # present in df_hc so we don't advertise annotation layers that weren't
+    # produced (e.g. REVEL / PrimateAI-3D when the pipeline was run without them).
+    _base_sources = ["COSMIC", "GENIE", "TCGA", "ClinVar", "OncoKB",
+                     "CancerHotspots", "TP53"]
+    _extras = []
+    if "revel_score" in df_hc.columns and df_hc["revel_score"].fillna("").astype(str).ne("").any():
+        _extras.append("REVEL")
+    if "primateai_score" in df_hc.columns and df_hc["primateai_score"].fillna("").astype(str).ne("").any():
+        _extras.append("PrimateAI-3D")
+    _meta_strip = "GRCh38 &nbsp;&middot;&nbsp; " + " &middot; ".join(_base_sources)
+    if _extras:
+        _meta_strip += " &nbsp;&ndash;&nbsp; " + " &middot; ".join(_extras)
 
     html = "\n".join([
         "<!DOCTYPE html>",
@@ -826,7 +899,7 @@ def build_report(df_full, df_hc, out_path, logo_path=None, db_versions_path=None
         '<meta charset="UTF-8">',
         '<meta name="viewport" content="width=device-width, initial-scale=1.0">',
         favicon_tag,
-        f"<title>OncoSieve Report {report_date}</title>",
+        f"<title>OncoSieve {ONCOSIEVE_VERSION} Report {report_date}</title>",
         '<link rel="stylesheet" href="https://cdn.datatables.net/1.13.8/css/jquery.dataTables.min.css">',
         '<link rel="stylesheet" href="https://cdn.datatables.net/buttons/2.4.2/css/buttons.dataTables.min.css">',
         '<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>',
@@ -855,10 +928,10 @@ def build_report(df_full, df_hc, out_path, logo_path=None, db_versions_path=None
         '<div class="page-header">',
         f"  {logo_img}",
         '  <div class="header-text">',
-        '    <h1 class="header-title">OncoSieve&nbsp;&nbsp;<span class="header-version">2.0</span></h1>',
+        f'    <h1 class="header-title">OncoSieve&nbsp;&nbsp;<span class="header-version">{ONCOSIEVE_VERSION}</span></h1>',
         '    <span class="header-sep"></span>',
         f'    <p class="header-subtitle">Pan-Cancer Variant Whitelist &nbsp;&ndash;&nbsp; Generated {report_date}</p>',
-        '    <div class="header-meta">GRCh38 &nbsp;&middot;&nbsp; COSMIC &middot; GENIE &middot; TCGA &middot; ClinVar &middot; OncoKB &middot; CancerHotspots &middot; TP53 &nbsp;&ndash;&nbsp; REVEL &middot; PrimateAI-3D</div>',
+        f'    <div class="header-meta">{_meta_strip}</div>',
         '    <div class="header-meta"><a href="https://github.com/Trethewey/oncosieve" style="color:#3D6E8F;text-decoration:none;">&#128279; github.com/Trethewey/oncosieve</a></div>',
         "  </div>",
         "</div>",
@@ -904,7 +977,7 @@ def build_report(df_full, df_hc, out_path, logo_path=None, db_versions_path=None
 
         # Top genes treemap
         '<div class="section" id="genes">',
-        '  <div class="section-title">Top Genes by Variant Count — top 60, High-Confidence</div>',
+        '  <div class="section-title">Top Genes by Variant Count — top 100, High-Confidence</div>',
         f'  <div class="tier-legend">{gene_legend}</div>',
         '  <div class="chart-card">',
         f"    {div_genes}",

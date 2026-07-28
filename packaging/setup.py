@@ -12,7 +12,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="oncosieve",
-    version="1.0.0",
+    version="2.1.0",
     description="Pan-Cancer Somatic Variant Whitelist Curation Tool",
     author="Dr Christopher Trethewey",
     author_email="christopher.trethewey@nhs.net",

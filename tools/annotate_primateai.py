@@ -323,11 +323,10 @@ if __name__ == '__main__':
 #            --output "${WL_FULL%.tsv.gz}_pai3d.tsv.gz"
 #    fi
 #
-# 5. Optional tier promotion (add to build_whitelist.py tiering logic):
-#
-#    # After standard tiering, promote Tier 3 -> Tier 2 if PrimateAI-3D
-#    # classifies the variant as pathogenic with high confidence:
-#    #   if primateai_prediction == 'pathogenic' and primateai_percentile >= 0.9:
-#    #       tier = min(tier, 2)
+# 5. Tier promotion (v2.1: implemented in post_pipeline.py after the
+#    annotate_primateai() call — a Tier 3 variant with
+#    primateai_prediction == 'pathogenic' and primateai_percentile >= 0.9
+#    is rescued to Tier 2. Kept out of build_whitelist.py because tiering
+#    already runs before PrimateAI annotation.
 #
 # =============================================================================
