@@ -194,8 +194,8 @@ _VCF_HEADER = """\
 ##INFO=<ID=HGVSp,Number=1,Type=String,Description="HGVSp notation">
 ##INFO=<ID=N_SAMPLES,Number=1,Type=Integer,Description="Total samples across count-based sources">
 ##INFO=<ID=N_CANCER_TYPES,Number=1,Type=Integer,Description="Number of distinct cancer types">
-##INFO=<ID=CANCER_TYPES,Number=.,Type=String,Description="Pipe-delimited list of cancer types">
-##INFO=<ID=SOURCES,Number=.,Type=String,Description="Pipe-delimited list of sources">
+##INFO=<ID=CANCER_TYPES,Number=.,Type=String,Description="Comma-delimited array of contributing cancer types (VCFv4.2 Number=.)">
+##INFO=<ID=SOURCES,Number=.,Type=String,Description="Comma-delimited array of contributing source databases (VCFv4.2 Number=.)">
 ##INFO=<ID=WL_TIER,Number=1,Type=Integer,Description="Whitelist tier: 1=highest, 3=minimum threshold">
 ##INFO=<ID=ONCOKB,Number=1,Type=String,Description="OncoKB oncogenicity classification (if available)">
 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO
@@ -422,10 +422,15 @@ def run_parsers(cfg: dict, skip: set, inter_dir: str = 'intermediate') -> dict[s
     tasks = {}
 
     if _should_run('tp53'):
+        # Pass the reference FASTA so parse_tp53 can properly anchor indels
+        # (deletion/insertion/duplication) at pos-1 with the real reference
+        # base. Without this, TP53 indels are dropped rather than fabricated.
+        tp53_ref_fasta = (cfg.get('reference') or {}).get('fasta')
         tasks['TP53'] = lambda: parse_tp53(
             somatic_tsv      = ds['tp53']['somatic_tsv'],
             germline_tsv     = ds['tp53'].get('germline_tsv'),
             include_germline = ds['tp53'].get('include_germline', False),
+            reference_fasta  = tp53_ref_fasta,
         )
 
     if _should_run('cancer_hotspots'):
@@ -918,10 +923,32 @@ def assign_tiers(df: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
     Thresholds are read from settings.yaml via cfg['tiering'].
     """
     tiering = (cfg or {}).get('tiering', {})
+
+    # Validate that the settings.yaml keys are as expected before falling back
+    # to defaults — a single typo silently substituted the built-in defaults
+    # and produced a mistiered whitelist with no evidence in the log.
+    _EXPECTED_TIER_KEYS = {
+        'tier1_min_samples', 'tier1_min_cancer_types',
+        'tier2_min_samples', 'tier2_min_cancer_types',
+    }
+    if tiering:
+        extra = set(tiering) - _EXPECTED_TIER_KEYS
+        if extra:
+            log.warning('Unrecognised keys in settings.yaml tiering block '
+                        '(possible typo — will not affect tiering): %s',
+                        sorted(extra))
+        missing = _EXPECTED_TIER_KEYS - set(tiering)
+        if missing:
+            log.warning('Missing keys in settings.yaml tiering block '
+                        '(using defaults): %s', sorted(missing))
+
     t1_s  = tiering.get('tier1_min_samples',       50)
     t1_ct = tiering.get('tier1_min_cancer_types',   3)
     t2_s  = tiering.get('tier2_min_samples',        25)
     t2_ct = tiering.get('tier2_min_cancer_types',    2)
+
+    log.info('Tier thresholds: T1 >= %d samples & >= %d cancer types  |  '
+             'T2 >= %d samples & >= %d cancer types', t1_s, t1_ct, t2_s, t2_ct)
 
     # Vectorised tiering — avoids iterrows on large dataframes
     onco = df['oncokb_oncogenicity'].fillna('').astype(str)
@@ -958,7 +985,15 @@ def write_tsv(df: pd.DataFrame, path: str) -> None:
         'transcript_source', 'is_mane_select', 'refseq_id',
         'tp53_class', 'wl_tier',
     ]
-    df_out = df[out_cols].sort_values(['chrom', 'pos'])
+    # Karyotypic sort so TSV row order matches the VCF (1,2,...,22,X,Y,MT).
+    # Lexicographic sort produced 1,10,11,...,2 which surprised users diffing
+    # the TSV against the VCF.
+    chrom_order = {str(i): i for i in range(1, 23)}
+    chrom_order.update({'X': 23, 'Y': 24, 'MT': 25, 'M': 25})
+    df_out = df[out_cols].copy()
+    chrom_clean = df_out['chrom'].astype(str).str.replace(r'^chr', '', regex=True)
+    df_out['_chrom_sort'] = chrom_clean.map(lambda c: chrom_order.get(c, 99))
+    df_out = df_out.sort_values(['_chrom_sort', 'pos']).drop(columns='_chrom_sort')
     df_out.to_csv(path, sep='\t', index=False,
                   compression='gzip' if path.endswith('.gz') else None)
     log.info('Wrote TSV: %s  (%d rows)', path, len(df_out))
@@ -968,10 +1003,39 @@ def write_vcf(df: pd.DataFrame, path: str) -> None:
     """Write whitelist as a sites-only VCF (no sample columns)."""
 
     def _vcf_escape(val):
-        """Escape VCF INFO special characters."""
+        """Percent-encode VCF INFO special characters.
+
+        Encodes the four reserved-in-INFO chars (%, ;, =, space) plus comma
+        (which is the VCFv4.2 array separator) and CR. Tabs and newlines are
+        percent-encoded rather than silently deleted so their presence
+        remains visible for debugging.
+        """
         if not isinstance(val, str):
             val = str(val)
-        return val.replace('%', '%25').replace(';', '%3B').replace('=', '%3D').replace(' ', '%20').replace('\t', '').replace('\n', '')
+        return (val
+                .replace('%',  '%25')
+                .replace(';',  '%3B')
+                .replace('=',  '%3D')
+                .replace(',',  '%2C')
+                .replace(' ',  '%20')
+                .replace('\r', '%0D')
+                .replace('\t', '%09')
+                .replace('\n', '%0A'))
+
+    def _vcf_array(pipe_joined, sep_out=','):
+        """Convert a pipe-delimited aggregator string to a VCF INFO array.
+
+        The aggregator emits `A|B|C`; VCFv4.2 arrays expect `A,B,C`. Each
+        element is individually escaped so embedded commas / spaces /
+        semicolons in a single cancer_type or source label do not break
+        array parsing downstream.
+        """
+        if pipe_joined is None:
+            return ''
+        s = str(pipe_joined)
+        if not s:
+            return ''
+        return sep_out.join(_vcf_escape(part) for part in s.split('|'))
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
@@ -994,20 +1058,24 @@ def write_vcf(df: pd.DataFrame, path: str) -> None:
         fh.write(header)
         for row in df.itertuples(index=False):
             info_parts = [
-                f'GENE={row.gene}',
-                f'CSQ={row.consequence}',
+                f'GENE={_vcf_escape(row.gene)}',
+                f'CSQ={_vcf_escape(row.consequence)}',
                 f'HGVSc={_vcf_escape(row.hgvsc)}',
                 f'HGVSp={_vcf_escape(row.hgvsp)}',
                 f'N_SAMPLES={row.n_samples}',
                 f'N_CANCER_TYPES={row.n_cancer_types}',
-                f'CANCER_TYPES={_vcf_escape(row.cancer_types)}',
-                f'SOURCES={_vcf_escape(row.sources)}',
+                # CANCER_TYPES and SOURCES declared as Number=. arrays; the
+                # aggregator stores them pipe-joined so the TSV stays human
+                # readable — convert to a comma-separated VCF array here.
+                f'CANCER_TYPES={_vcf_array(row.cancer_types)}',
+                f'SOURCES={_vcf_array(row.sources)}',
                 f'WL_TIER={row.wl_tier}',
             ]
-            if getattr(row, 'oncokb_oncogenicity', None):
-                info_parts.append(f'ONCOKB={_vcf_escape(row.oncokb_oncogenicity)}')
+            onco = getattr(row, 'oncokb_oncogenicity', None)
+            if isinstance(onco, str) and onco and onco.lower() not in ('nan', 'none'):
+                info_parts.append(f'ONCOKB={_vcf_escape(onco)}')
 
-            info = ';'.join(p for p in info_parts if '=' in p and p.split('=', 1)[1])
+            info = ';'.join(p for p in info_parts if '=' in p and p.split('=', 1)[1]) or '.'
             fh.write('\t'.join([
                 str(row.chrom),
                 str(row.pos),

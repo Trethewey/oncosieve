@@ -37,6 +37,7 @@ from parsers.common import (
     clean_allele,
     empty_standard_df,
     is_valid_allele,
+    map_consequence,
     normalise_chrom,
     setup_logger,
 )
@@ -54,6 +55,12 @@ _MAF_COLS = {
     'consequence': 'Variant_Classification',
     'sample_id':   'Tumor_Sample_Barcode',
 }
+
+# Optional MAF columns — used if present, ignored if absent so the parser
+# still works on older MAF releases that lack them.
+_MAF_OPT_COL_CSQ    = 'Consequence'      # VEP term (multi-term '&'-joined); richer than Variant_Classification
+_MAF_OPT_COL_TID    = 'Transcript_ID'    # ENST — prepended to bare c. HGVSc so MANE Select can resolve
+_MAF_OPT_COL_FILTER = 'FILTER'           # only PASS / . / empty is kept
 
 _CLINICAL_SAMPLE_ID_COL    = 'SAMPLE_ID'
 _CLINICAL_ONCOTREE_COL     = 'ONCOTREE_CODE'
@@ -106,14 +113,37 @@ def parse_genie(maf_path: str,
         log.error('GENIE MAF missing columns: %s', missing)
         return empty_standard_df()
 
+    # FILTER: only PASS calls contribute to the whitelist. Mirrors parse_tcga.
+    if _MAF_OPT_COL_FILTER in df_maf.columns:
+        n_before = len(df_maf)
+        flt = df_maf[_MAF_OPT_COL_FILTER].astype(str).str.strip().str.upper()
+        df_maf = df_maf[flt.isin({'PASS', '.', ''})].copy()
+        n_after = len(df_maf)
+        if n_before != n_after:
+            log.info('GENIE FILTER: %d rows excluded (%d kept)',
+                     n_before - n_after, n_after)
+    else:
+        log.warning('GENIE MAF has no FILTER column — assuming all calls PASS')
+
     # Vectorized processing — avoids iterrows on ~3.4M rows
-    df = df_maf[[
+    working_cols = [
         _MAF_COLS['chrom'], _MAF_COLS['pos'], _MAF_COLS['ref'], _MAF_COLS['alt'],
         _MAF_COLS['gene'], _MAF_COLS['hgvsc'], _MAF_COLS['hgvsp'],
         _MAF_COLS['consequence'], _MAF_COLS['sample_id'],
-    ]].copy()
-    df.columns = ['chrom', 'pos', 'ref', 'alt', 'gene', 'hgvsc', 'hgvsp',
-                  'consequence', 'sample_id']
+    ]
+    if _MAF_OPT_COL_CSQ in df_maf.columns:
+        working_cols.append(_MAF_OPT_COL_CSQ)
+    if _MAF_OPT_COL_TID in df_maf.columns:
+        working_cols.append(_MAF_OPT_COL_TID)
+
+    df = df_maf[working_cols].copy()
+    new_names = ['chrom', 'pos', 'ref', 'alt', 'gene', 'hgvsc', 'hgvsp',
+                 'variant_classification', 'sample_id']
+    if _MAF_OPT_COL_CSQ in df_maf.columns:
+        new_names.append('vep_consequence')
+    if _MAF_OPT_COL_TID in df_maf.columns:
+        new_names.append('transcript_id')
+    df.columns = new_names
 
     # Clean alleles
     df['ref'] = df['ref'].str.strip().str.upper()
@@ -142,8 +172,31 @@ def parse_genie(maf_path: str,
     for col in ('gene', 'hgvsc', 'hgvsp'):
         df[col] = df[col].str.strip()
 
-    # Map consequences vectorially
-    df['consequence'] = df['consequence'].str.strip().map(CONSEQUENCE_MAP).fillna('unknown')
+    # Prepend Transcript_ID to bare c. HGVSc so the MANE Select lookup
+    # downstream can find an ENST accession. Without this, GENIE (transcript
+    # priority 1) contributes bare c.-strings that never resolve to a MANE
+    # transcript and is_mane_select stays False for most whitelist rows.
+    if 'transcript_id' in df.columns:
+        tid = df['transcript_id'].astype(str).str.strip()
+        bare_c = df['hgvsc'].str.startswith('c.', na=False) & tid.ne('') & tid.ne('nan')
+        df.loc[bare_c, 'hgvsc'] = tid[bare_c] + ':' + df.loc[bare_c, 'hgvsc']
+        df = df.drop(columns=['transcript_id'])
+
+    # Consequence mapping. Prefer VEP Consequence (multi-term '&'-joined) via
+    # map_consequence, fall back to MAF Variant_Classification via CONSEQUENCE_MAP.
+    if 'vep_consequence' in df.columns:
+        df['consequence'] = df['vep_consequence'].fillna('').astype(str).str.strip().apply(map_consequence)
+        # Backfill any 'unknown' from the coarser MAF column
+        mask = df['consequence'].eq('unknown')
+        if mask.any():
+            df.loc[mask, 'consequence'] = (
+                df.loc[mask, 'variant_classification']
+                  .str.strip().map(CONSEQUENCE_MAP).fillna('unknown')
+            )
+        df = df.drop(columns=['vep_consequence'])
+    else:
+        df['consequence'] = df['variant_classification'].str.strip().map(CONSEQUENCE_MAP).fillna('unknown')
+    df = df.drop(columns=['variant_classification'])
 
     # Cancer type from clinical lookup
     df['sample_id'] = df['sample_id'].str.strip()

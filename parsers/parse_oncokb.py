@@ -66,15 +66,22 @@ _AA3TO1 = {
 
 def _hgvsp_to_oncokb(hgvsp: str) -> str | None:
     """
-    Convert an hgvsp string to the single-letter format expected by OncoKB.
+    Convert an hgvsp string to the single-letter substitution format expected
+    by OncoKB (e.g. G12D, W235R).
 
     Handles:
       ENSP00000484643.1:p.Trp235Arg  -> W235R
       p.Trp235Arg                    -> W235R
       p.Gly12Asp                     -> G12D
-      p.Ter510SerextTer49            -> *510S  (OncoKB uses * for stop)
       W235R                          -> W235R  (already correct)
-    Returns None if the string cannot be parsed.
+
+    Rejects (returns None) — the OncoKB byProteinChange endpoint interprets
+    the query strictly as a substitution, so anything with a suffix (fs, ext,
+    del, ins, dup) or a non-substitution class would otherwise silently
+    inherit an unrelated variant's oncogenicity:
+      p.Ala100Argfs*7                -> None
+      p.Trp235TerextTer49            -> None
+      p.Lys100_Lys101del             -> None
     """
     s = hgvsp.strip()
 
@@ -86,14 +93,17 @@ def _hgvsp_to_oncokb(hgvsp: str) -> str | None:
     if s.startswith('p.'):
         s = s[2:]
 
-    # Already single-letter format e.g. G12D, W235R
+    # Already single-letter substitution form
     if re.match(r'^[A-Z*]\d+[A-Z*]$', s):
         return s
 
-    # 3-letter format: convert ref and alt AA
+    # 3-letter form: only accept a clean substitution with an empty suffix.
     m = re.match(r'^([A-Z][a-z]{2})(\d+)([A-Z][a-z]{2}|\*)(.*)$', s)
     if m:
         ref3, pos, alt3, suffix = m.groups()
+        if suffix:
+            # e.g. fs, ext, del, ins, dup — not a substitution; reject.
+            return None
         ref1 = _AA3TO1.get(ref3)
         alt1 = _AA3TO1.get(alt3, alt3) if alt3 != '*' else '*'
         if ref1:
@@ -245,7 +255,7 @@ def _parse_api_results(results: list, include_oncogenicity: list) -> pd.DataFram
         alts.append(alt)
         effects.append(effect)
         oncogenicities.append(onco)
-        cancer_types.append('pan_cancer')
+        cancer_types.append('unspecified')
 
     log.info('OncoKB API: %d / %d pass oncogenicity filter', len(genes), len(results))
     if not genes:
@@ -266,8 +276,11 @@ def _build_output(genes, alts, effects, oncogenicities, cancer_types) -> pd.Data
             'gene':        gene,
             'hgvsc':       '',
             'hgvsp':       _normalise_hgvsp(alt),
-            'consequence': _map_effect(effect),
-            'cancer_type': (ctype or 'pan_cancer').lower(),
+            'consequence': _map_effect(effect, alt),
+            # Use 'unspecified' (aggregator sentinel) rather than 'pan_cancer'
+            # when the row has no cancer-type label; the pan-cancer semantics
+            # of OncoKB entries are already carried by the OncoKB source label.
+            'cancer_type': (ctype or 'unspecified').lower(),
             'n_samples':   0,
             'source':      f'OncoKB:{onco}',
         })
@@ -277,12 +290,49 @@ def _build_output(genes, alts, effects, oncogenicities, cancer_types) -> pd.Data
     return df_out
 
 
-def _map_effect(effect: str) -> str:
+def _map_effect(effect: str, alteration: str = '') -> str:
+    """
+    Derive a standardised consequence term from OncoKB's Mutation Effect plus
+    the raw Alteration string.
+
+    OncoKB's Mutation Effect column carries functional effect (Gain-of-function,
+    Loss-of-function, Neutral, Inconclusive) — NOT variant class — so labelling
+    every gain-/loss-of-function as 'missense' was wrong for truncating,
+    fusion, amplification, splice and indel alterations. We inspect the
+    Alteration string first for its class, and only fall back to 'missense'
+    when the alteration is a clean amino-acid substitution.
+    """
+    a = alteration.strip()
     e = effect.lower()
-    if 'gain' in e:
-        return 'missense'
-    if 'loss' in e:
-        return 'missense'
+
+    # Class inferred from Alteration string
+    if a:
+        low = a.lower()
+        if 'truncating' in low:
+            return 'nonsense'
+        if 'amplification' in low:
+            return 'structural'
+        if 'deletion' in low or 'del' in low.split():
+            return 'inframe_indel'
+        if 'fusion' in low:
+            return 'structural'
+        if 'splice' in low:
+            return 'splice_site'
+        if re.search(r'fs\*?\d*$', a):
+            return 'frameshift'
+        if a.endswith('del') or 'del' in a:
+            return 'inframe_indel'
+        if a.endswith('ins') or 'ins' in a:
+            return 'inframe_indel'
+        if a.endswith('dup') or 'dup' in a:
+            return 'inframe_indel'
+        # Clean single-substitution: G12D, R175H, *510S
+        if re.match(r'^[A-Z*]\d+[A-Z*]$', a):
+            return 'missense'
+        # 3-letter substitution: Gly12Asp
+        if re.match(r'^[A-Z][a-z]{2}\d+([A-Z][a-z]{2}|\*)$', a):
+            return 'missense'
+
     if 'neutral' in e:
         return 'synonymous'
     return 'unknown'

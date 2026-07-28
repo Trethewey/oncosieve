@@ -14,12 +14,17 @@ Parse the NCI TP53 database (GRCh38) somatic and germline variant files.
 Required files:
   SomaticVariants_GRCh38.csv   (primary)
   GermlineVariants_GRCh38.csv  (optional, if include_germline=True)
+  reference_fasta               (optional but strongly recommended) — used to
+                                 build proper VCF-style anchor-base indels.
+                                 Without it, TP53 indels are DROPPED rather
+                                 than fabricated with placeholder anchors.
 
 Download: https://tp53.cancer.gov
 
 Key column usage:
   - Position  : g_description_GRCh38 (e.g. g.7675184A>G)
-  - REF/ALT   : parsed from g_description_GRCh38
+  - REF/ALT   : parsed from g_description_GRCh38 (SNVs directly; indels via
+                the reference FASTA when available, else dropped)
   - Consequence: Effect (case-insensitive)
   - Cancer type: Morphology (histological diagnosis)
   - HGVSc     : c_description
@@ -44,6 +49,41 @@ from parsers.common import (
 
 log = setup_logger('TP53')
 
+# Reference-FASTA singleton. Set by parse_tp53() when a fasta path is provided
+# so _parse_gdesc can look up the anchor base for indel normalisation. A None
+# value means indels get dropped rather than fabricated with placeholder bases.
+_FASTA = None
+
+
+def _open_fasta(fasta_path: str):
+    """Return a pyfaidx.Fasta handle or None."""
+    if not fasta_path or not os.path.exists(fasta_path):
+        return None
+    try:
+        import pyfaidx
+    except ImportError:
+        log.warning('TP53: pyfaidx not installed — indels will be dropped. '
+                    'pip install pyfaidx')
+        return None
+    try:
+        return pyfaidx.Fasta(fasta_path)
+    except Exception as e:
+        log.warning('TP53: could not open reference FASTA %s: %s — indels will be dropped',
+                    fasta_path, e)
+        return None
+
+
+def _fasta_base(chrom: str, pos: int) -> str | None:
+    """Return the 1-based base at (chrom, pos) or None."""
+    if _FASTA is None:
+        return None
+    for key in (chrom, chrom.lstrip('chr'), f'chr{chrom.lstrip("chr")}'):
+        try:
+            return str(_FASTA[key][pos - 1]).upper()
+        except (KeyError, IndexError):
+            continue
+    return None
+
 # Regex to parse g_description_GRCh38
 # SNV:    g.7674220C>T
 _GDESC_SNV_RE = re.compile(r'g\.(\d+)([ACGTacgt])>([ACGTacgt])')
@@ -62,13 +102,24 @@ def _parse_gdesc(gdesc: str):
     Parse g_description_GRCh38 into (pos, ref, alt) in VCF-style coordinates.
     Returns (pos, ref, alt) or None if unparseable.
 
-    Handles: SNV, deletion (with explicit bases), insertion, delins, duplication.
-    Deletions/insertions without explicit bases cannot be resolved without a
-    reference FASTA and return None.
+    SNVs are resolved directly. Indels (deletion, insertion, delins,
+    duplication) require an anchor base from the reference FASTA — when
+    the module-level `_FASTA` singleton is None (no reference configured
+    or pyfaidx missing), indels are dropped rather than fabricated with
+    placeholder bases. The v2 fabrication produced REF==ALT deletions
+    and REF='N' insertions that clinicians could not trust.
     """
     gdesc = gdesc.strip()
 
-    # Try delins first (before plain del, since delins contains 'del')
+    # SNV: g.NNNNref>alt  — no FASTA lookup needed.
+    m = _GDESC_SNV_RE.search(gdesc)
+    if m:
+        return int(m.group(1)), m.group(2).upper(), m.group(3).upper()
+
+    # Try delins first (before plain del, since delins contains 'del').
+    # delins is representable directly (both alleles given), but VCF convention
+    # is that ref and alt should start with the same anchor base. Some
+    # downstream tools also accept the direct form; we emit it as-given.
     m = _GDESC_DELINS_RE.search(gdesc)
     if m:
         pos = int(m.group(1))
@@ -76,45 +127,52 @@ def _parse_gdesc(gdesc: str):
         alt = m.group(3).upper()
         return pos, ref, alt
 
-    # SNV: g.NNNNref>alt
-    m = _GDESC_SNV_RE.search(gdesc)
-    if m:
-        return int(m.group(1)), m.group(2).upper(), m.group(3).upper()
+    # For everything below, we need a reference base at pos-1 (VCF anchor).
+    # If FASTA is not available, drop the row.
+    if _FASTA is None:
+        return None
 
     # Deletion with explicit bases: g.NNNNdelBASES
+    # VCF: pos=pos-1, ref=anchor+deleted, alt=anchor
     m = _GDESC_DEL_RE.search(gdesc)
     if m:
         pos = int(m.group(1))
         deleted = m.group(2).upper()
-        # VCF-style: need the preceding base, but we don't have FASTA.
-        # Use first base of deleted sequence as anchor (approximate; pos stays same).
-        # ref = deleted, alt = first base of deleted (the anchor)
-        # This is an approximation — VCF convention is pos-1 anchor, but without
-        # FASTA we use the first deleted base as anchor.
-        ref = deleted
-        alt = deleted[0]  # keep first base, delete rest
-        return pos, ref, alt
+        anchor = _fasta_base('chr17', pos - 1)
+        if anchor is None:
+            return None
+        return pos - 1, anchor + deleted, anchor
 
     # Insertion: g.NNNN_NNNN+1insBASES
+    # VCF: pos=pos, ref=anchor(pos), alt=anchor+inserted
     m = _GDESC_INS_RE.search(gdesc)
     if m:
         pos = int(m.group(1))
         inserted = m.group(2).upper()
-        # VCF-style: ref = base at pos, alt = base + inserted
-        # Without FASTA, use 'N' as placeholder anchor
-        return pos, 'N', 'N' + inserted
+        anchor = _fasta_base('chr17', pos)
+        if anchor is None:
+            return None
+        return pos, anchor, anchor + inserted
 
     # Duplication with explicit bases: g.NNNNdupBASES
+    # A dup at [pos..pos+k-1] is equivalent to an insertion of the same bases
+    # immediately after pos+k-1. VCF: pos=pos+k-1, ref=anchor(pos+k-1),
+    # alt=anchor+duped.
     m = _GDESC_DUP_RE.search(gdesc)
     if m and m.group(2):
         pos = int(m.group(1))
         duped = m.group(2).upper()
-        # Dup is equivalent to an insertion of the duplicated bases
-        return pos, duped[0], duped[0] + duped
+        last_dup_pos = pos + len(duped) - 1
+        anchor = _fasta_base('chr17', last_dup_pos)
+        if anchor is None:
+            return None
+        return last_dup_pos, anchor, anchor + duped
 
     return None
 
-# Consequence mapping — case-insensitive lookup applied at parse time
+# Consequence mapping — case-insensitive lookup applied at parse time.
+# 'deletion' and 'insertion' resolve at call-site by frame-checking (len(ref) - len(alt)) % 3,
+# not by unconditionally labelling every indel as frameshift.
 _TP53_CONSEQUENCE_MAP = {
     'missense':   'missense',
     'nonsense':   'nonsense',
@@ -123,14 +181,18 @@ _TP53_CONSEQUENCE_MAP = {
     'frameshift': 'frameshift',
     'in-frame':   'inframe_indel',
     'in frame':   'inframe_indel',
-    'deletion':   'frameshift',
-    'insertion':  'frameshift',
     'complex':    'frameshift',
     'intronic':   'intronic',
     'other':      'unknown',
     'unknown':    'unknown',
     '':           'unknown',
 }
+
+
+def _indel_consequence(ref: str, alt: str) -> str:
+    """Return 'frameshift' or 'inframe_indel' based on length difference."""
+    delta = len(ref) - len(alt)
+    return 'inframe_indel' if delta % 3 == 0 else 'frameshift'
 
 # DNE_LOFclass — retained as metadata but no longer used as a filter.
 # The TP53 database is comprehensive; gating on functional class dropped 45% of
@@ -139,7 +201,25 @@ _TP53_CONSEQUENCE_MAP = {
 
 def parse_tp53(somatic_tsv: str,
                germline_tsv: str | None = None,
-               include_germline: bool = False) -> pd.DataFrame:
+               include_germline: bool = False,
+               reference_fasta: str | None = None) -> pd.DataFrame:
+    """
+    Parse TP53 somatic (and optionally germline) variant files.
+
+    If `reference_fasta` is provided and pyfaidx is available, indels are
+    normalised with a real anchor base from the FASTA. Otherwise indels
+    are dropped and only SNVs and delins entries reach the output.
+    """
+    global _FASTA
+    _FASTA = _open_fasta(reference_fasta) if reference_fasta else None
+    if reference_fasta and _FASTA is None:
+        log.warning('TP53: reference FASTA unavailable — indels will be dropped')
+    elif _FASTA is None:
+        log.info('TP53: no reference_fasta configured — indels will be dropped '
+                 '(SNVs and delins still processed)')
+    else:
+        log.info('TP53: reference FASTA opened for indel anchor normalisation')
+
     frames = []
 
     if os.path.exists(somatic_tsv):
@@ -215,12 +295,20 @@ def _parse_tp53_tsv(path: str, source_label: str) -> pd.DataFrame | None:
 
             # --- Consequence (case-insensitive) ---
             effect_raw  = str(row[effect_col]).strip().lower() if effect_col else ''
-            consequence = _TP53_CONSEQUENCE_MAP.get(effect_raw,
-                          map_consequence(effect_raw))
+            if effect_raw in ('deletion', 'insertion', 'duplication', 'indel'):
+                # Frame-derive from allele-length delta rather than assuming
+                # every deletion or insertion is a frameshift.
+                consequence = _indel_consequence(ref, alt)
+            else:
+                consequence = _TP53_CONSEQUENCE_MAP.get(effect_raw,
+                              map_consequence(effect_raw))
 
             # --- Cancer type from Morphology ---
-            cancer_type = str(row[morpho_col]).strip().lower() if morpho_col else ''
-            if not cancer_type or cancer_type in ('', 'na', 'nan'):
+            # Kept lowercase for legacy compatibility with the TP53 pathway,
+            # but the aggregator's _clean_cancer_type does canonical case
+            # normalisation across all sources.
+            cancer_type = str(row[morpho_col]).strip() if morpho_col else ''
+            if not cancer_type or cancer_type.lower() in ('', 'na', 'nan'):
                 cancer_type = 'unspecified'
 
             # --- Sample count ---

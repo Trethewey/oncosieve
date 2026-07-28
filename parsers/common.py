@@ -55,6 +55,9 @@ CONSEQUENCE_MAP: dict[str, str] = {
     'Substitution - Missense':           'missense',
     'Substitution - Nonsense':           'nonsense',
     'Substitution - synonymous':         'synonymous',
+    'Substitution - Silent':             'synonymous',
+    'Substitution - coding silent':      'synonymous',
+    'Substitution - Coding silent':      'synonymous',
     'Insertion - Frameshift':            'frameshift',
     'Deletion - Frameshift':             'frameshift',
     'Insertion - In frame':              'inframe_indel',
@@ -62,10 +65,15 @@ CONSEQUENCE_MAP: dict[str, str] = {
     'Complex - deletion inframe':        'inframe_indel',
     'Complex - insertion inframe':       'inframe_indel',
     'Complex - frameshift':              'frameshift',
+    'Complex':                           'unknown',
+    'Complex - compound substitution':   'missense',
     'Nonstop extension':                 'stop_lost',
     'Whole gene deletion':               'structural',
     'Splice site':                       'splice_site',
+    'Splice - donor':                    'splice_site',
+    'Splice - acceptor':                 'splice_site',
     'Unknown':                           'unknown',
+    'unknown':                           'unknown',
     # MAF variant classification terms
     'Missense_Mutation':                 'missense',
     'Nonsense_Mutation':                 'nonsense',
@@ -106,8 +114,12 @@ INCLUDED_CONSEQUENCES: set[str] = {
     'unknown',    # retain unknowns; review manually downstream
 }
 
-# Valid nucleotide characters for REF/ALT validation
-_VALID_ALLELE_CHARS = re.compile(r'^[ACGTNacgtn*-]+$')
+# Valid nucleotide characters for REF/ALT validation.
+# NOTE: '-' is deliberately excluded. MAF-style '-' alleles for indels are not
+# valid VCF and must be normalised to an anchor-base representation upstream
+# in the parser (or the row must be dropped). Allowing '-' here caused
+# malformed VCFs and silent data loss across multiple parsers.
+_VALID_ALLELE_CHARS = re.compile(r'^[ACGTNacgtn*]+$')
 
 
 # ── Chromosome normalisation ───────────────────────────────────────────────────

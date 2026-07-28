@@ -72,11 +72,21 @@ def _build_classification_lookup(classification_path: str) -> dict[str, str]:
     """
     Parse COSMIC Classification TSV and return a dict:
     COSMIC_PHENOTYPE_ID (e.g. COSO36004862) -> PRIMARY_HISTOLOGY (e.g. 'carcinoma')
+
+    If the classification file is missing the parser cannot resolve readable
+    cancer_type labels — every phenotype ID would land as its own "cancer type"
+    in the aggregator and every COSMIC variant would clear the tier1 threshold.
+    We therefore raise a hard error rather than silently produce garbage.
     """
     if not classification_path or not os.path.exists(classification_path):
-        log.warning('COSMIC classification file not found: %s — cancer types will be phenotype IDs',
-                    classification_path)
-        return {}
+        raise RuntimeError(
+            f'COSMIC classification file not found: {classification_path!r}. '
+            'Without it every COSMIC phenotype ID is treated as a distinct '
+            'cancer type, artificially promoting variants past tier thresholds. '
+            'Download the Cosmic_Classification file from the same COSMIC release '
+            'as the mutation TSV and set data_sources.cosmic.classification in '
+            'config.yaml.'
+        )
     log.info('Building COSMIC classification lookup from %s', classification_path)
     lookup: dict[str, str] = {}
     opener = gzip.open if classification_path.endswith('.gz') else open
@@ -295,8 +305,8 @@ def _process_cosmic_chunk(chunk: list[list],
 
             chrom_raw  = parts[col_idx[_COL_CHROM]].strip()
             start_raw  = parts[col_idx[_COL_START]].strip()
-            ref        = parts[col_idx[_COL_REF]].strip()
-            alt        = parts[col_idx[_COL_ALT]].strip()
+            ref        = clean_allele(parts[col_idx[_COL_REF]])
+            alt        = clean_allele(parts[col_idx[_COL_ALT]])
 
             if not chrom_raw or not start_raw or start_raw == 'NS':
                 continue
@@ -311,7 +321,10 @@ def _process_cosmic_chunk(chunk: list[list],
 
             gene        = parts[col_idx[_COL_GENE]].strip()
             pheno_id    = parts[col_idx[_COL_SITE]].strip()
-            cancer_type = classification_lookup.get(pheno_id, pheno_id).lower()
+            # Fall back to the aggregator's 'unspecified' sentinel when the
+            # phenotype has no readable label — the raw 'cosoNNNNN' ID would
+            # otherwise be counted as a distinct cancer type downstream.
+            cancer_type = classification_lookup.get(pheno_id, 'unspecified').lower()
             sample_id   = parts[col_idx[_COL_SAMPLE_ID]].strip()
             cds         = parts[col_idx[_COL_CDS]].strip()
             desc        = parts[col_idx[_COL_DESC]].strip()
